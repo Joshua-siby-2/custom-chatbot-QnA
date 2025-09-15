@@ -1,4 +1,22 @@
 fastapi
 uvicorn
+streamlit
 requests
+pydantic
 python-multipart
+langchain
+langchain-community
+chromadb
+sentence-transformers
+huggingface-hub
+plotly
+pandas
+python-docx
+pypdf
+unstructured
+python-csv
+
+# Additional dependencies for document processing
+python-magic-bin  # Windows
+python-magic      # Linux/Mac
+openpyxl          # Excel files

@@ -1,0 +1,21 @@
+{
+  "files": {
+    "india.docx": {
+      "hash": "2eec158b7d95faae228b94b0e22e0783",
+      "processed_at": "1757670688.595908"
+    },
+    "messi.pdf": {
+      "hash": "4dd520821cbb0b4cdb6ad0b98c780715",
+      "processed_at": "1757670728.109744"
+    },
+    "sample.txt": {
+      "hash": "0b092b4bc2b4549e7181141e3cf8826e",
+      "processed_at": "1757669998.8747857"
+    },
+    "meeting_notes_20250828_153401.txt": {
+      "hash": "9ecaa4d39638dcc2c325ad5b9f21d676",
+      "processed_at": "1757677303.32884"
+    }
+  },
+  "version": "1.0"
+}
