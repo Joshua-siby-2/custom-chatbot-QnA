@@ -20,3 +20,8 @@ python-csv
 python-magic-bin  # Windows
 python-magic      # Linux/Mac
 openpyxl          # Excel files
+
+PyPDF2
+python-docx
+pandas
+python-magic

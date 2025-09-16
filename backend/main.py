@@ -10,6 +10,11 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
 import glob
+import PyPDF2
+import docx
+import pandas as pd
+from io import BytesIO
+import magic
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -74,6 +79,40 @@ def update_progress(progress: int, message: str, files_processed: int = 0, total
         "total_files": total_files
     })
     logging.info(f"Progress: {progress}% - {message}")
+
+def extract_text_from_file(file_content: bytes, filename: str) -> str:
+    """Extract text from various file formats"""
+    file_ext = os.path.splitext(filename)[1].lower()
+    
+    try:
+        if file_ext == '.txt':
+            return file_content.decode('utf-8')
+        
+        elif file_ext == '.pdf':
+            text = ""
+            pdf_reader = PyPDF2.PdfReader(BytesIO(file_content))
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+            return text
+        
+        elif file_ext in ['.docx', '.doc']:
+            doc = docx.Document(BytesIO(file_content))
+            text = ""
+            for paragraph in doc.paragraphs:
+                text += paragraph.text + "\n"
+            return text
+        
+        # elif file_ext == '.csv':
+        #     df = pd.read_csv(BytesIO(file_content))
+        #     return df.to_string(index=False)
+        
+        else:
+            raise ValueError(f"Unsupported file format: {file_ext}")
+    
+    except Exception as e:
+        logging.error(f"Error extracting text from {filename}: {e}")
+        raise
+
 
 def create_db_background(force_recreate: bool = False):
     """Run database creation in background thread with progress updates"""
@@ -151,7 +190,7 @@ def root():
         "message": "Enhanced RAG API", 
         "version": "2.0.0",
         "features": [
-            "Multiple file format support (TXT, PDF, DOCX, CSV)",
+            "Multiple file format support (TXT, PDF, DOCX)",
             "Parallel document processing",
             "Incremental updates",
             "Document search",
@@ -281,36 +320,22 @@ def get_db_status():
 @app.get("/supported-formats")
 def get_supported_formats():
     """Get list of supported document formats"""
-    if 'rag_handler' in globals():
-        from llm.improved_rag_handler import FILE_LOADERS
-        return {
-            "formats": list(FILE_LOADERS.keys()),
-            "descriptions": {
-                ".txt": "Plain text files",
-                ".pdf": "PDF documents", 
-                ".docx": "Microsoft Word documents (newer format)",
-                ".doc": "Microsoft Word documents (older format)",
-                ".csv": "Comma-separated values"
-            }
-        }
-    else:
-        return {
-            "formats": [".txt"],
-            "descriptions": {".txt": "Plain text files (legacy mode)"}
-        }
+    return {
+        "formats": [".txt", ".pdf", ".docx", ".doc"],
+        "descriptions": {
+            ".txt": "Plain text files",
+            ".pdf": "PDF documents", 
+            ".docx": "Microsoft Word documents (newer format)",
+            ".doc": "Microsoft Word documents (older format)"        }
+    }
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     """Upload a document file to the documents directory"""
     logging.info(f"Received file upload: {file.filename}")
     
-    # Get supported formats
-    if 'rag_handler' in globals():
-        from llm.improved_rag_handler import FILE_LOADERS, DOCUMENTS_PATH
-        supported_formats = list(FILE_LOADERS.keys())
-    else:
-        supported_formats = [".txt"]
-        DOCUMENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "documents")
+    # Supported formats
+    supported_formats = ['.txt', '.pdf', '.docx', '.doc']
     
     # Check file extension
     file_ext = os.path.splitext(file.filename)[1].lower()
@@ -322,12 +347,25 @@ async def upload_file(file: UploadFile = File(...)):
     
     try:
         # Create documents directory if it doesn't exist
+        DOCUMENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "documents")
         os.makedirs(DOCUMENTS_PATH, exist_ok=True)
+        
+        # Read file content
+        file_content = await file.read()
         
         # Save uploaded file
         file_path = os.path.join(DOCUMENTS_PATH, file.filename)
         with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            buffer.write(file_content)
+        
+        # Extract and save text content for processing
+        try:
+            text_content = extract_text_from_file(file_content, file.filename)
+            text_file_path = os.path.join(DOCUMENTS_PATH, f"{os.path.splitext(file.filename)[0]}.txt")
+            with open(text_file_path, "w", encoding="utf-8") as text_file:
+                text_file.write(text_content)
+        except Exception as e:
+            logging.warning(f"Could not extract text from {file.filename}: {e}")
         
         logging.info(f"File saved to: {file_path}")
         return {

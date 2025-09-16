@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 import plotly.express as px
 import pandas as pd
+import os  # Add this import
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -222,13 +223,19 @@ def handle_file_management():
         response = requests.get(f"{BACKEND_URL}/supported-formats", timeout=5)
         if response.status_code == 200:
             formats_data = response.json()
-            supported_formats = formats_data.get("formats", [".txt"])
-            st.info(f"Supported formats: {', '.join(supported_formats)}")
+            supported_formats = formats_data.get("formats", [".txt", ".pdf", ".docx", ".doc", ".csv"])
+            format_descriptions = formats_data.get("descriptions", {})
+            
+            # Display format information
+            with st.expander("📋 Supported Formats Info"):
+                for fmt, desc in format_descriptions.items():
+                    st.markdown(f"**{fmt}**: {desc}")
         else:
-            supported_formats = [".txt"]
-    except:
-        supported_formats = [".txt"]
-        st.warning("Could not retrieve supported formats")
+            supported_formats = [".txt", ".pdf", ".docx", ".doc", ".csv"]
+            st.warning("Could not retrieve supported formats from server")
+    except Exception as e:
+        supported_formats = [".txt", ".pdf", ".docx", ".doc", ".csv"]
+        st.warning(f"Could not connect to server for format info: {e}")
     
     # File upload
     uploaded_file = st.file_uploader(
@@ -238,24 +245,30 @@ def handle_file_management():
     )
     
     if uploaded_file is not None:
-        if st.button("📤 Upload File"):
-            try:
+        try:
+            # Show file info
+            file_ext = os.path.splitext(uploaded_file.name)[1].lower()
+            st.info(f"File: {uploaded_file.name} ({format_file_size(uploaded_file.size)})")
+            
+            if st.button("📤 Upload File"):
                 files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
                 response = requests.post(f"{BACKEND_URL}/upload", files=files, timeout=30)
                 
                 if response.status_code == 200:
                     result = response.json()
                     st.success(f"✅ {result['message']}")
-                    st.info(f"File size: {result['size']} bytes")
+                    st.info(f"File size: {result['size']} bytes, Format: {result['format']}")
                     # Refresh the document list
                     if 'documents_data' in st.session_state:
                         del st.session_state.documents_data
                     st.rerun()
                 else:
-                    st.error(f"Upload failed: {response.json().get('detail', 'Unknown error')}")
-            except Exception as e:
-                st.error(f"Upload error: {str(e)}")
+                    error_detail = response.json().get('detail', 'Unknown error')
+                    st.error(f"Upload failed: {error_detail}")
+        except Exception as e:
+            st.error(f"Error processing file: {str(e)}")
     
+    # Rest of the function remains the same...
     # Document list
     st.markdown("---")
     st.subheader("📄 Document List")
@@ -279,14 +292,38 @@ def handle_file_management():
     if documents:
         st.info(f"Found {len(documents)} documents")
         
-        # Create a table view
+        # Group documents by type
+        doc_types = {}
         for doc in documents:
-            col1, col2, col3 = st.columns([3, 2, 1])
+            ext = doc['extension']
+            if ext not in doc_types:
+                doc_types[ext] = []
+            doc_types[ext].append(doc)
+        
+        # Show document type counts
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("TXT", len(doc_types.get('.txt', [])))
+        with col2:
+            st.metric("PDF", len(doc_types.get('.pdf', [])))
+        with col3:
+            st.metric("DOCX", len(doc_types.get('.docx', [])))
+        with col4:
+            st.metric("DOC", len(doc_types.get('.doc', [])))
+        with col5:
+            st.metric("CSV", len(doc_types.get('.csv', [])))
+        
+        # Create a table view
+        st.subheader("All Documents")
+        for doc in documents:
+            col1, col2, col3, col4 = st.columns([4, 2, 1, 1])
             with col1:
                 st.write(f"**{doc['filename']}**")
             with col2:
                 st.write(f"{format_file_size(doc['size'])}")
             with col3:
+                st.write(f"{doc['extension']}")
+            with col4:
                 if st.button("🗑️", key=f"delete_{doc['filename']}"):
                     delete_document(doc['filename'])
         
@@ -468,7 +505,7 @@ def display_system_metrics():
 def display_features():
     """Display feature list"""
     features = [
-        "🔄 **Multi-format Support**: PDF, DOCX, TXT, CSV",
+        "🔄 **Multi-format Support**: PDF, DOCX, TXT",
         "⚡ **Fast Processing**: Parallel document loading",
         "🔍 **Smart Search**: Semantic document search",
         "💾 **Incremental Updates**: Only process new/changed files",
