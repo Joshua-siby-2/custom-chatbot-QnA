@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
+import glob
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -380,6 +381,43 @@ def clear_database():
     except Exception as e:
         logging.error(f"Error clearing database: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error clearing database: {str(e)}")
+
+@app.get("/documents")
+def list_documents():
+    """Get list of all documents in the documents directory"""
+    try:
+        if 'rag_handler' in globals():
+            from llm.improved_rag_handler import DOCUMENTS_PATH
+        else:
+            DOCUMENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "documents")
+        
+        # Create directory if it doesn't exist
+        os.makedirs(DOCUMENTS_PATH, exist_ok=True)
+        
+        # Get all files in the documents directory
+        files = []
+        for file_path in glob.glob(os.path.join(DOCUMENTS_PATH, "*")):
+            if os.path.isfile(file_path):
+                file_info = {
+                    "filename": os.path.basename(file_path),
+                    "size": os.path.getsize(file_path),
+                    "modified": datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat(),
+                    "extension": os.path.splitext(file_path)[1].lower()
+                }
+                files.append(file_info)
+        
+        # Sort files by name
+        files.sort(key=lambda x: x["filename"])
+        
+        return {
+            "documents": files,
+            "count": len(files),
+            "path": DOCUMENTS_PATH
+        }
+        
+    except Exception as e:
+        logging.error(f"Error listing documents: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
 
 if __name__ == "__main__":
     logging.info("Starting enhanced backend server.")

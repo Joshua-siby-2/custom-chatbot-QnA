@@ -247,10 +247,94 @@ def handle_file_management():
                     result = response.json()
                     st.success(f"✅ {result['message']}")
                     st.info(f"File size: {result['size']} bytes")
+                    # Refresh the document list
+                    if 'documents_data' in st.session_state:
+                        del st.session_state.documents_data
+                    st.rerun()
                 else:
                     st.error(f"Upload failed: {response.json().get('detail', 'Unknown error')}")
             except Exception as e:
                 st.error(f"Upload error: {str(e)}")
+    
+    # Document list
+    st.markdown("---")
+    st.subheader("📄 Document List")
+    
+    # Get documents list
+    if 'documents_data' not in st.session_state or st.button("🔄 Refresh List"):
+        try:
+            response = requests.get(f"{BACKEND_URL}/documents", timeout=5)
+            if response.status_code == 200:
+                st.session_state.documents_data = response.json()
+            else:
+                st.error("Failed to load documents")
+                return
+        except Exception as e:
+            st.error(f"Error loading documents: {e}")
+            return
+    
+    documents_data = st.session_state.get('documents_data', {})
+    documents = documents_data.get('documents', [])
+    
+    if documents:
+        st.info(f"Found {len(documents)} documents")
+        
+        # Create a table view
+        for doc in documents:
+            col1, col2, col3 = st.columns([3, 2, 1])
+            with col1:
+                st.write(f"**{doc['filename']}**")
+            with col2:
+                st.write(f"{format_file_size(doc['size'])}")
+            with col3:
+                if st.button("🗑️", key=f"delete_{doc['filename']}"):
+                    delete_document(doc['filename'])
+        
+        # Show detailed view in expander
+        with st.expander("📊 Detailed View"):
+            # Create DataFrame for better visualization
+            df_data = []
+            for doc in documents:
+                df_data.append({
+                    "Filename": doc['filename'],
+                    "Size": format_file_size(doc['size']),
+                    "Type": doc['extension'],
+                    "Modified": doc['modified'][:10]  # Just the date part
+                })
+            
+            if df_data:
+                df = pd.DataFrame(df_data)
+                st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No documents found. Upload files to get started.")
+
+def format_file_size(size_bytes):
+    """Format file size in human-readable format"""
+    if size_bytes == 0:
+        return "0B"
+    size_names = ["B", "KB", "MB", "GB"]
+    i = 0
+    while size_bytes >= 1024 and i < len(size_names) - 1:
+        size_bytes /= 1024.0
+        i += 1
+    return f"{size_bytes:.1f}{size_names[i]}"
+
+def delete_document(filename):
+    """Delete a document"""
+    try:
+        # First we need to implement a delete endpoint in the backend
+        # For now, we'll just show a message
+        st.warning(f"Delete functionality for {filename} would be implemented here")
+        # In a real implementation, we would call:
+        # response = requests.delete(f"{BACKEND_URL}/documents/{filename}")
+        # if response.status_code == 200:
+        #     st.success(f"Deleted {filename}")
+        #     del st.session_state.documents_data
+        #     st.rerun()
+        # else:
+        #     st.error("Failed to delete file")
+    except Exception as e:
+        st.error(f"Error deleting file: {e}")
 
 def handle_database_operations():
     """Handle database creation and management"""
