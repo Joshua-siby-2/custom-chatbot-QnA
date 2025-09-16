@@ -131,8 +131,9 @@ def main():
                     st.markdown(f"**Assistant:** {answer}")
                     if sources:
                         st.markdown("**Sources:**")
-                        for j, source in enumerate(sources):
-                            st.markdown(f"- {source['source']}: {source['content_preview'][:100]}...")
+                        # Now sources is just a list of file names
+                        for source_file in sources:
+                            st.markdown(f"- {source_file}")
                     st.markdown(f"*{timestamp}*")
                     st.markdown('</div>', unsafe_allow_html=True)
         
@@ -443,7 +444,7 @@ def handle_question(question, temperature, max_results):
                 st.session_state.chat_history.append((
                     question,
                     result["answer"],
-                    result.get("sources", []),
+                    result.get("sources", []),  # Now just a list of file names
                     timestamp
                 ))
                 

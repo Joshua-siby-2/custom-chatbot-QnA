@@ -231,19 +231,19 @@ def ask(question: Question):
         logging.info("Processing question with QA chain.")
         result = qa_chain({"query": question.question})
         
-        # Get source documents info
+        # Get source documents info - only return source file names
         sources = []
         if "source_documents" in result:
             for doc in result["source_documents"][:3]:  # Limit to top 3 sources
-                sources.append({
-                    "source": doc.metadata.get('source_file', 'Unknown'),
-                    "content_preview": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
-                })
+                source_file = doc.metadata.get('source_file', 'Unknown')
+                # Only add if not already in the list (to avoid duplicates)
+                if source_file not in sources:
+                    sources.append(source_file)
         
         logging.info(f"Successfully answered question: {question.question}")
         return {
             "answer": result["result"],
-            "sources": sources,
+            "sources": sources,  # Now just a list of file names
             "question": question.question
         }
         
