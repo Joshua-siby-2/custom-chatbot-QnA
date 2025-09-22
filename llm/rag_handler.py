@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import torch
 
 from langchain.chains import RetrievalQA
 from langchain_community.document_loaders import (
@@ -45,16 +46,31 @@ class ImprovedRAGHandler:
         self.embeddings = None
         self.vectordb = None
         self.qa_chain = None
+        self.llm = None
+        self.retriever = None
         self._initialize_embeddings()
+        self._initialize_llm()
     
     def _initialize_embeddings(self):
         """Initialize embeddings model once"""
         logging.info("Initializing embeddings model...")
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        logging.info(f"Using device: {device}")
         self.embeddings = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL_NAME,
-            model_kwargs={'device': 'cpu'}  # Use CPU for stability
+            model_kwargs={'device': device}
         )
         logging.info("Embeddings model initialized")
+    
+    def _initialize_llm(self):
+        """Initialize LLM once"""
+        logging.info("Initializing LLM...")
+        self.llm = Ollama(
+            base_url=OLLAMA_BASE_URL, 
+            model=OLLAMA_MODEL,
+            temperature=0.1  # Default temperature
+        )
+        logging.info("LLM initialized")
     
     def _get_file_hash(self, file_path: str) -> str:
         """Generate hash for a file to track changes"""
@@ -270,7 +286,7 @@ class ImprovedRAGHandler:
     
     def get_qa_chain(self, temperature: float = 0.1):
         """
-        Creates a RetrievalQA chain for question answering.
+        Creates or retrieves a RetrievalQA chain for question answering.
         """
         if not os.path.exists(PERSIST_DIRECTORY):
             logging.warning("Vector database not found.")
@@ -284,24 +300,21 @@ class ImprovedRAGHandler:
                     embedding_function=self.embeddings
                 )
             
-            retriever = self.vectordb.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": 5}  # Retrieve top 5 relevant chunks
-            )
-            
-            if not self.qa_chain:
-                logging.info("Initializing LLM...")
-                llm = Ollama(
-                    base_url=OLLAMA_BASE_URL, 
-                    model=OLLAMA_MODEL,
-                    temperature=temperature
+            if not self.retriever:
+                logging.info("Initializing retriever...")
+                self.retriever = self.vectordb.as_retriever(
+                    search_type="similarity",
+                    search_kwargs={"k": 5}  # Retrieve top 5 relevant chunks
                 )
-                
-                logging.info("Creating QA chain...")
+            
+            # Recreate the chain only if the temperature has changed
+            if not self.qa_chain or self.llm.temperature != temperature:
+                logging.info(f"Creating QA chain with temperature: {temperature}")
+                self.llm.temperature = temperature
                 self.qa_chain = RetrievalQA.from_chain_type(
-                    llm=llm,
+                    llm=self.llm,
                     chain_type="stuff",
-                    retriever=retriever,
+                    retriever=self.retriever,
                     return_source_documents=True,
                     verbose=False
                 )
