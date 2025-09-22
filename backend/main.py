@@ -457,6 +457,47 @@ def list_documents():
         logging.error(f"Error listing documents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
 
+@app.delete("/documents/{filename}")
+def delete_document(filename: str):
+    """Delete a document from the documents directory"""
+    logging.info(f"Request to delete document: {filename}")
+    
+    try:
+        if 'rag_handler' in globals():
+            from llm.improved_rag_handler import DOCUMENTS_PATH
+        else:
+            DOCUMENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "documents")
+        
+        # Security check: prevent path traversal attacks
+        if '..' in filename or filename.startswith('/'):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        
+        file_path = os.path.join(DOCUMENTS_PATH, filename)
+        logging.info(f"Filepath is: {file_path}")
+
+
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Delete the file
+        os.remove(file_path)
+        
+        # Also try to delete the corresponding text file if it exists
+        text_file_path = os.path.join(DOCUMENTS_PATH, f"{os.path.splitext(filename)[0]}.txt")
+        if os.path.exists(text_file_path):
+            os.remove(text_file_path)
+        
+        logging.info(f"Document deleted: {filename}")
+        return {"message": f"Document '{filename}' deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error deleting document: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
+
 if __name__ == "__main__":
     logging.info("Starting enhanced backend server.")
     import uvicorn

@@ -68,7 +68,8 @@ class ImprovedRAGHandler:
         self.llm = Ollama(
             base_url=OLLAMA_BASE_URL, 
             model=OLLAMA_MODEL,
-            temperature=0.1  # Default temperature
+            temperature=0.1,  # Default temperature
+            # num_ctx=512
         )
         logging.info("LLM initialized")
     
