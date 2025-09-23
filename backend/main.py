@@ -3,9 +3,10 @@ import os
 import threading
 import logging
 import time
+import traceback
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Request
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
@@ -17,22 +18,56 @@ from io import BytesIO
 import magic
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('app.log', mode='a')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Add the parent directory to the sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+# Try to import the RAG handler
 try:
+    logger.info("Attempting to import improved_rag_handler...")
     from llm.improved_rag_handler import rag_handler
-except ImportError:
-    # Fallback to original handler
-    from llm.rag_handler import get_qa_chain, create_vector_db
+    logger.info("Successfully imported improved_rag_handler")
+except ImportError as e:
+    logger.warning(f"Could not import improved_rag_handler: {str(e)}")
+    try:
+        logger.info("Falling back to original rag_handler...")
+        from llm.rag_handler import get_qa_chain, create_vector_db
+        logger.info("Successfully imported rag_handler")
+    except ImportError as e:
+        logger.error(f"Failed to import rag_handler: {str(e)}")
+        raise
 
+# Create FastAPI app
 app = FastAPI(
     title="Enhanced RAG API",
     description="A powerful RAG system supporting multiple document formats",
     version="2.0.0"
 )
+
+# Middleware to log all requests
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"Incoming request: {request.method} {request.url}")
+    logger.debug(f"Headers: {dict(request.headers)}")
+    
+    try:
+        start_time = time.time()
+        response = await call_next(request)
+        process_time = (time.time() - start_time) * 1000
+        logger.info(f"Request completed in {process_time:.2f}ms - Status: {response.status_code}")
+        return response
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}\n{traceback.format_exc()}")
+        raise
 
 # Add CORS middleware
 app.add_middleware(
@@ -66,19 +101,37 @@ db_creation_status = {
     "files_processed": 0,
     "total_files": 0,
     "start_time": None,
-    "end_time": None
+    "end_time": None,
+    "last_updated": None
 }
 
 def update_progress(progress: int, message: str, files_processed: int = 0, total_files: int = 0):
-    """Update the global progress status"""
+    """Update the global progress status with detailed logging"""
     global db_creation_status
+    
+    # Log the progress update
+    log_message = f"Progress: {progress}% - {message}"
+    if total_files > 0:
+        log_message += f" (Processed {files_processed} of {total_files} files)"
+    
+    # Log at appropriate level based on progress
+    if progress == 0:
+        logger.info(f"Starting database update: {message}")
+    elif progress == 100:
+        logger.info(f"Database update complete: {message}")
+    elif progress % 20 == 0:  # Log every 20%
+        logger.info(log_message)
+    else:
+        logger.debug(log_message)
+    
+    # Update the status
     db_creation_status.update({
         "progress": progress,
         "message": message,
         "files_processed": files_processed,
-        "total_files": total_files
+        "total_files": total_files,
+        "last_updated": datetime.now().isoformat()
     })
-    logging.info(f"Progress: {progress}% - {message}")
 
 def extract_text_from_file(file_content: bytes, filename: str) -> str:
     """Extract text from various file formats"""
@@ -118,14 +171,21 @@ def create_db_background(force_recreate: bool = False):
     """Run database creation in background thread with progress updates"""
     global db_creation_status
     
-    logging.info("Starting database creation in background.")
+    logger.info("Starting database creation in background.")
+    logger.debug(f"Force recreate: {force_recreate}")
+    
+    # Initialize status with detailed information
+    start_time = datetime.now()
     db_creation_status.update({
         "in_progress": True, 
         "completed": False, 
         "error": None,
         "progress": 0,
-        "start_time": datetime.now().isoformat(),
-        "end_time": None
+        "start_time": start_time.isoformat(),
+        "end_time": None,
+        "message": "Initializing database creation...",
+        "files_processed": 0,
+        "total_files": 0
     })
     
     try:
@@ -298,169 +358,142 @@ def create_db(config: DatabaseConfig = DatabaseConfig()):
     thread.daemon = True
     thread.start()
     
-    return {"message": "Vector database creation process started.", "status": db_creation_status}
+    return {"message": "Database creation started", "status": db_creation_status}
 
 @app.get("/db-status")
 def get_db_status():
     """Get detailed database status"""
-    logging.info("Request for database status.")
+    logger.debug("Database status requested")
+    logger.debug(f"Current status: {db_creation_status}")
     
-    status = db_creation_status.copy()
+    # Log a warning if database creation failed
+    if db_creation_status.get("error"):
+        logger.warning(f"Database creation failed: {db_creation_status['error']}")
     
-    # Add additional stats if available
-    if 'rag_handler' in globals() and db_creation_status["completed"]:
+    # Log if database creation is taking too long
+    if db_creation_status["in_progress"] and "start_time" in db_creation_status and db_creation_status["start_time"]:
         try:
-            stats = rag_handler.get_database_stats()
-            status.update({"database_stats": stats})
-        except Exception as e:
-            logging.warning(f"Could not get database stats: {e}")
+            start_time = datetime.fromisoformat(db_creation_status["start_time"])
+            duration = (datetime.now() - start_time).total_seconds()
+            if duration > 300:  # 5 minutes
+                logger.warning(f"Database creation is taking longer than expected: {duration:.1f} seconds")
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Error calculating database creation duration: {e}")
     
-    return status
+    return db_creation_status
 
 @app.get("/supported-formats")
 def get_supported_formats():
     """Get list of supported document formats"""
-    return {
-        "formats": [".txt", ".pdf", ".docx", ".doc"],
-        "descriptions": {
-            ".txt": "Plain text files",
-            ".pdf": "PDF documents", 
-            ".docx": "Microsoft Word documents (newer format)",
-            ".doc": "Microsoft Word documents (older format)"        }
-    }
-
-@app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
-    """Upload a document file to the documents directory"""
-    logging.info(f"Received file upload: {file.filename}")
+    logger.info("Fetching list of supported document formats")
     
-    # Supported formats
-    supported_formats = ['.txt', '.pdf', '.docx', '.doc']
+    formats = [
+        {"extension": ".txt", "type": "Plain Text"},
+        {"extension": ".pdf", "type": "PDF Document"},
+        {"extension": ".docx", "type": "Microsoft Word"},
+        {"extension": ".doc", "type": "Microsoft Word (Legacy)"}
+    ]
     
-    # Check file extension
-    file_ext = os.path.splitext(file.filename)[1].lower()
-    if file_ext not in supported_formats:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file format. Supported formats: {supported_formats}"
-        )
-    
-    try:
-        # Create documents directory if it doesn't exist
-        DOCUMENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "documents")
-        os.makedirs(DOCUMENTS_PATH, exist_ok=True)
-        
-        # Read file content
-        file_content = await file.read()
-        
-        # Save uploaded file
-        file_path = os.path.join(DOCUMENTS_PATH, file.filename)
-        with open(file_path, "wb") as buffer:
-            buffer.write(file_content)
-        
-        # Extract and save text content for processing
-        try:
-            text_content = extract_text_from_file(file_content, file.filename)
-            text_file_path = os.path.join(DOCUMENTS_PATH, f"{os.path.splitext(file.filename)[0]}.txt")
-            with open(text_file_path, "w", encoding="utf-8") as text_file:
-                text_file.write(text_content)
-        except Exception as e:
-            logging.warning(f"Could not extract text from {file.filename}: {e}")
-        
-        logging.info(f"File saved to: {file_path}")
-        return {
-            "message": f"File '{file.filename}' uploaded successfully",
-            "filename": file.filename,
-            "size": os.path.getsize(file_path),
-            "format": file_ext
-        }
-        
-    except Exception as e:
-        logging.error(f"Error uploading file: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
-
-@app.delete("/clear-db")
-def clear_database():
-    """Clear the vector database"""
-    global db_creation_status
-    logging.info("Request to clear database.")
-    
-    if db_creation_status["in_progress"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot clear database while creation is in progress."
-        )
-    
-    try:
-        if 'rag_handler' in globals():
-            from llm.improved_rag_handler import PERSIST_DIRECTORY
-        else:
-            PERSIST_DIRECTORY = os.path.join(os.path.dirname(__file__), "..", "db")
-        
-        if os.path.exists(PERSIST_DIRECTORY):
-            shutil.rmtree(PERSIST_DIRECTORY)
-            logging.info("Database cleared successfully.")
-        
-        # Reset status
-        db_creation_status = {
-            "in_progress": False,
-            "completed": False,
-            "error": None,
-            "progress": 0,
-            "message": "Database cleared",
-            "files_processed": 0,
-            "total_files": 0,
-            "start_time": None,
-            "end_time": None
-        }
-        
-        return {"message": "Database cleared successfully."}
-        
-    except Exception as e:
-        logging.error(f"Error clearing database: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error clearing database: {str(e)}")
+    logger.debug(f"Supported formats: {formats}")
+    return {"supported_formats": formats}
 
 @app.get("/documents")
 def list_documents():
-    """Get list of all documents in the documents directory"""
+    """List all uploaded documents"""
+    logger.info("Listing all documents")
+    
     try:
         if 'rag_handler' in globals():
             from llm.improved_rag_handler import DOCUMENTS_PATH
         else:
             DOCUMENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "documents")
         
-        # Create directory if it doesn't exist
+        # Ensure the documents directory exists
         os.makedirs(DOCUMENTS_PATH, exist_ok=True)
         
         # Get all files in the documents directory
-        files = []
-        for file_path in glob.glob(os.path.join(DOCUMENTS_PATH, "*")):
+        documents = []
+        for filename in os.listdir(DOCUMENTS_PATH):
+            file_path = os.path.join(DOCUMENTS_PATH, filename)
             if os.path.isfile(file_path):
-                file_info = {
-                    "filename": os.path.basename(file_path),
-                    "size": os.path.getsize(file_path),
-                    "modified": datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat(),
-                    "extension": os.path.splitext(file_path)[1].lower()
-                }
-                files.append(file_info)
+                file_stat = os.stat(file_path)
+                documents.append({
+                    "filename": filename,
+                    "size": file_stat.st_size,
+                    "last_modified": datetime.fromtimestamp(file_stat.st_mtime).isoformat(),
+                    "extension": os.path.splitext(filename)[1].lower()
+                })
         
-        # Sort files by name
-        files.sort(key=lambda x: x["filename"])
-        
-        return {
-            "documents": files,
-            "count": len(files),
-            "path": DOCUMENTS_PATH
-        }
+        logger.info(f"Found {len(documents)} documents")
+        return {"documents": documents}
         
     except Exception as e:
-        logging.error(f"Error listing documents: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
+        error_msg = f"Error listing documents: {str(e)}"
+        logger.error(f"{error_msg}. Error details: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_msg)
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """Upload a document file to the documents directory"""
+    logger.info(f"Received file upload request for: {file.filename}")
+    logger.debug(f"File size: {file.size} bytes")
+    
+    try:
+        if 'rag_handler' in globals():
+            from llm.improved_rag_handler import DOCUMENTS_PATH
+            logger.debug("Using improved_rag_handler DOCUMENTS_PATH")
+        else:
+            DOCUMENTS_PATH = os.path.join(os.path.dirname(__file__), "..", "documents")
+            logger.debug(f"Using default DOCUMENTS_PATH: {DOCUMENTS_PATH}")
+        
+        # Ensure the documents directory exists
+        os.makedirs(DOCUMENTS_PATH, exist_ok=True)
+        logger.debug(f"Documents directory ready at: {DOCUMENTS_PATH}")
+        
+        # Validate file extension
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        logger.debug(f"File extension: {file_ext}")
+        
+        if file_ext not in ['.txt', '.pdf', '.docx', '.doc']:
+            error_msg = f"Unsupported file format: {file_ext}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=400, detail=error_msg)
+        
+        # Save the file
+        file_path = os.path.join(DOCUMENTS_PATH, file.filename)
+        logger.info(f"Saving file to: {file_path}")
+        
+        start_time = time.time()
+        try:
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            
+            file_size = os.path.getsize(file_path)
+            logger.info(f"File saved successfully. Size: {file_size} bytes")
+            
+            return {
+                "message": f"File {file.filename} uploaded successfully",
+                "path": file_path,
+                "size": file_size,
+                "upload_time": time.time() - start_time
+            }
+            
+        except IOError as e:
+            error_msg = f"Failed to save file: {str(e)}"
+            logger.error(f"{error_msg}. Error details: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=error_msg)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = f"Unexpected error during file upload: {str(e)}"
+        logger.error(f"{error_msg}. Error details: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.delete("/documents/{filename}")
 def delete_document(filename: str):
     """Delete a document from the documents directory"""
-    logging.info(f"Request to delete document: {filename}")
+    logger.info(f"Request to delete document: {filename}")
     
     try:
         if 'rag_handler' in globals():
@@ -473,9 +506,7 @@ def delete_document(filename: str):
             raise HTTPException(status_code=400, detail="Invalid filename")
         
         file_path = os.path.join(DOCUMENTS_PATH, filename)
-        logging.info(f"Filepath is: {file_path}")
-
-
+        logger.info(f"Filepath is: {file_path}")
         
         # Check if file exists
         if not os.path.exists(file_path):
@@ -483,6 +514,7 @@ def delete_document(filename: str):
         
         # Delete the file
         os.remove(file_path)
+        logger.info(f"Document deleted: {filename}")
         
         # Also try to delete the corresponding text file if it exists
         text_file_path = os.path.join(DOCUMENTS_PATH, f"{os.path.splitext(filename)[0]}.txt")
