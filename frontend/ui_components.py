@@ -5,6 +5,9 @@ import logging
 import pandas as pd
 import os
 from datetime import datetime
+import sseclient
+import json
+from typing import List
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -289,6 +292,65 @@ def handle_question(BACKEND_URL: str, question: str, temperature: float, max_res
                 
         except Exception as e:
             st.error(f"Connection error: {e}")
+
+
+def handle_question_streaming(BACKEND_URL: str, question: str, temperature: float, max_results: int):
+    """Handle user question with live streaming from backend SSE."""
+    if not hasattr(st.session_state, 'db_status') or not st.session_state.db_status.get("completed"):
+        st.error("Database not ready. Please create the database first.")
+        return
+
+    placeholder = st.empty()
+    sources_placeholder = st.empty()
+    answer_text = ""
+
+    try:
+        payload = {
+            "question": question,
+            "temperature": temperature,
+            "max_results": max_results
+        }
+        # stream=True to get raw SSE
+        response = requests.post(f"{BACKEND_URL}/ask-stream", json=payload, stream=True, timeout=300, headers={"Accept": "text/event-stream"})
+        if response.status_code != 200:
+            try:
+                st.error(f"Error: {response.json().get('detail', 'Unknown error')}")
+            except Exception:
+                st.error("Streaming request failed")
+            return
+
+        client = sseclient.SSEClient(response)
+        sources: List[str] = [] if 'List' in globals() else []
+        for event in client.events():
+            if not event.data:
+                continue
+            try:
+                data = json.loads(event.data)
+            except Exception:
+                # Some SSE libs send comments/keepalive lines
+                continue
+            evt_type = data.get("type")
+            if evt_type == "token":
+                answer_text += data.get("data", "")
+                placeholder.markdown(f"**Assistant:** {answer_text}")
+            elif evt_type == "summary":
+                # Final summary includes sources
+                answer_text = data.get("answer", answer_text)
+                sources = data.get("sources", [])
+                placeholder.markdown(f"**Assistant:** {answer_text}")
+                if sources:
+                    with sources_placeholder.container():
+                        st.markdown("**Sources:**")
+                        for src in sources:
+                            st.markdown(f"- {src}")
+            elif evt_type == "error":
+                st.error(data.get("data", "Unknown streaming error"))
+        # Save to chat history
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state.chat_history.append((question, answer_text, sources, timestamp))
+        st.rerun()
+    except Exception as e:
+        st.error(f"Streaming error: {e}")
 
 
 def handle_document_search(BACKEND_URL: str, query: str, max_results: int):

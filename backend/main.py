@@ -16,6 +16,9 @@ import docx
 import pandas as pd
 from io import BytesIO
 import magic
+from fastapi.responses import StreamingResponse
+from queue import Queue
+import json as _json
 
 # Configure logging
 logging.basicConfig(
@@ -529,6 +532,128 @@ def delete_document(filename: str):
     except Exception as e:
         logging.error(f"Error deleting document: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
+
+@app.post("/ask-stream")
+def ask_stream(question: Question):
+    """Stream an answer token-by-token using Server-Sent Events (SSE)."""
+    logging.info(f"[stream] Received question: {question.question}")
+
+    if db_creation_status["in_progress"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Database creation in progress ({db_creation_status['progress'] }%). Please wait."
+        )
+
+    if not db_creation_status["completed"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Vector database not ready. Please create it first."
+        )
+
+    # Prepare a token queue and a background worker to run the chain
+    token_queue: Queue = Queue()
+
+    # Lazy import for callbacks to avoid global dependency if not needed
+    try:
+        from langchain.callbacks.base import BaseCallbackHandler
+    except Exception as e:
+        logging.error(f"Failed to import LangChain callback base: {e}")
+        raise HTTPException(status_code=500, detail="Server callback initialization error")
+
+    class StreamCallbackHandler(BaseCallbackHandler):
+        def on_llm_new_token(self, token: str, **kwargs):
+            try:
+                token_queue.put({"type": "token", "data": token})
+            except Exception as e:
+                logging.error(f"[stream] Error enqueueing token: {e}")
+
+    # Obtain QA chain with callbacks
+    try:
+        if 'rag_handler' in globals():
+            qa_chain = rag_handler.get_qa_chain(temperature=question.temperature)
+        else:
+            qa_chain = get_qa_chain()
+        if not qa_chain:
+            raise HTTPException(status_code=400, detail="QA chain could not be initialized. Please recreate the database.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"[stream] Error creating QA chain: {e}")
+        raise HTTPException(status_code=500, detail=f"Error creating QA chain: {str(e)}")
+
+    # Attach callbacks to chain and underlying LLM if present
+    try:
+        callback_handler = StreamCallbackHandler()
+        if hasattr(qa_chain, 'callbacks') and isinstance(qa_chain.callbacks, list):
+            qa_chain.callbacks.append(callback_handler)
+        else:
+            qa_chain.callbacks = [callback_handler]
+        # Try to attach to llm as well (best effort)
+        if hasattr(qa_chain, 'llm_chain') and hasattr(qa_chain.llm_chain, 'llm'):
+            llm_obj = qa_chain.llm_chain.llm
+            if hasattr(llm_obj, 'callbacks') and isinstance(llm_obj.callbacks, list):
+                llm_obj.callbacks.append(callback_handler)
+            else:
+                try:
+                    llm_obj.callbacks = [callback_handler]
+                except Exception:
+                    pass
+    except Exception as e:
+        logging.warning(f"[stream] Could not attach callbacks cleanly: {e}")
+
+    # Run the chain in a background thread so we can stream tokens concurrently
+    result_holder: Dict[str, Any] = {"result": None, "sources": []}
+
+    def run_chain():
+        try:
+            result = qa_chain({"query": question.question})
+            result_holder["result"] = result.get("result", "")
+            # Extract sources (file names only)
+            sources: List[str] = []
+            if "source_documents" in result:
+                for doc in result["source_documents"][:3]:
+                    src = doc.metadata.get('source_file', 'Unknown')
+                    if src not in sources:
+                        sources.append(src)
+            result_holder["sources"] = sources
+        except Exception as e:
+            logging.error(f"[stream] Error during chain execution: {e}")
+            token_queue.put({"type": "error", "data": str(e)})
+        finally:
+            token_queue.put({"type": "end"})
+
+    worker = threading.Thread(target=run_chain, daemon=True)
+    worker.start()
+
+    def sse_event_generator():
+        try:
+            # Initial event
+            yield f"data: { _json.dumps({ 'type': 'start' }) }\n\n"
+            while True:
+                item = token_queue.get()
+                if not item:
+                    continue
+                if item.get("type") == "token":
+                    # Stream token chunks
+                    yield f"data: { _json.dumps(item) }\n\n"
+                elif item.get("type") == "error":
+                    yield f"data: { _json.dumps(item) }\n\n"
+                elif item.get("type") == "end":
+                    # Send final summary (answer + sources)
+                    summary = {
+                        "type": "summary",
+                        "answer": result_holder.get("result", ""),
+                        "sources": result_holder.get("sources", [])
+                    }
+                    yield f"data: { _json.dumps(summary) }\n\n"
+                    yield "event: done\ndata: {}\n\n"
+                    break
+        except GeneratorExit:
+            logging.info("[stream] Client disconnected from SSE stream")
+        except Exception as e:
+            logging.error(f"[stream] SSE generator error: {e}")
+
+    return StreamingResponse(sse_event_generator(), media_type="text/event-stream")
 
 if __name__ == "__main__":
     logging.info("Starting enhanced backend server.")

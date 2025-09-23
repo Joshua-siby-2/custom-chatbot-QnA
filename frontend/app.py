@@ -7,6 +7,7 @@ from ui_components import (
     handle_document_search,
     display_system_metrics,
     display_features,
+    handle_question_streaming,
 )
 import time
 from datetime import datetime
@@ -106,7 +107,11 @@ def main():
             submitted = st.form_submit_button("🚀 Ask", use_container_width=True)
             
             if submitted and question:
-                handle_question(BACKEND_URL, question, temperature, max_results)
+                # Prefer streaming; fallback to non-streaming on error
+                try:
+                    handle_question_streaming(BACKEND_URL, question, temperature, max_results)
+                except Exception:
+                    handle_question(BACKEND_URL, question, temperature, max_results)
     
     with col2:
         st.header("🔍 Quick Actions")
