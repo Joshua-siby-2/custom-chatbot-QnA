@@ -2,6 +2,7 @@ import os
 import logging
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,6 +44,8 @@ FILE_LOADERS = {
 
 class ImprovedRAGHandler:
     def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.logger.info("--- Initializing ImprovedRAGHandler ---")
         self.embeddings = None
         self.vectordb = None
         self.qa_chain = None
@@ -50,28 +53,30 @@ class ImprovedRAGHandler:
         self.retriever = None
         self._initialize_embeddings()
         self._initialize_llm()
+        self.logger.info("--- ImprovedRAGHandler initialized ---")
     
     def _initialize_embeddings(self):
         """Initialize embeddings model once"""
-        logging.info("Initializing embeddings model...")
+        self.logger.info("Step A: Initializing embeddings model...")
+        start_time = time.time()
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        logging.info(f"Using device: {device}")
+        self.logger.info(f"Using device: {device} for embeddings")
         self.embeddings = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL_NAME,
             model_kwargs={'device': device}
         )
-        logging.info("Embeddings model initialized")
+        self.logger.info(f"Step A finished in {time.time() - start_time:.2f} seconds.")
     
     def _initialize_llm(self):
         """Initialize LLM once"""
-        logging.info("Initializing LLM...")
+        self.logger.info("Step B: Initializing LLM...")
+        start_time = time.time()
         self.llm = Ollama(
             base_url=OLLAMA_BASE_URL, 
             model=OLLAMA_MODEL,
-            temperature=0.1,  # Default temperature
-            # num_ctx=512
+            temperature=0.1,
         )
-        logging.info("LLM initialized")
+        self.logger.info(f"Step B finished in {time.time() - start_time:.2f} seconds.")
     
     def _get_file_hash(self, file_path: str) -> str:
         """Generate hash for a file to track changes"""
@@ -116,7 +121,6 @@ class ImprovedRAGHandler:
         try:
             loader_class = FILE_LOADERS[file_ext]
             
-            # Special handling for CSV files
             if file_ext == '.csv':
                 loader = loader_class(file_path)
             else:
@@ -124,7 +128,6 @@ class ImprovedRAGHandler:
             
             documents = loader.load()
             
-            # Add metadata to documents
             for doc in documents:
                 doc.metadata.update({
                     'source_file': os.path.basename(file_path),
@@ -163,7 +166,6 @@ class ImprovedRAGHandler:
         """
         logging.info(f"Starting vector database creation...")
         
-        # Create documents directory if it doesn't exist
         if not os.path.exists(DOCUMENTS_PATH):
             os.makedirs(DOCUMENTS_PATH)
             logging.info(f"Created documents directory at {DOCUMENTS_PATH}")
@@ -173,7 +175,6 @@ class ImprovedRAGHandler:
                 "files_processed": 0
             }
         
-        # Get all supported files
         supported_files = self._get_supported_files(DOCUMENTS_PATH)
         logging.info(f"Found {len(supported_files)} supported files")
         
@@ -184,16 +185,13 @@ class ImprovedRAGHandler:
                 "files_processed": 0
             }
         
-        # Load existing metadata
         metadata = self._load_metadata()
         
-        # Check if we need to update the database
         files_to_process = []
         if force_recreate or not os.path.exists(PERSIST_DIRECTORY):
             files_to_process = supported_files
             logging.info("Full database recreation requested or database doesn't exist")
         else:
-            # Check for new or modified files
             for file_path in supported_files:
                 file_hash = self._get_file_hash(file_path)
                 relative_path = os.path.relpath(file_path, DOCUMENTS_PATH)
@@ -213,7 +211,6 @@ class ImprovedRAGHandler:
         try:
             logging.info(f"Processing {len(files_to_process)} files...")
             
-            # Load documents in parallel
             documents = self._load_documents_parallel(files_to_process)
             
             if not documents:
@@ -225,7 +222,6 @@ class ImprovedRAGHandler:
             
             logging.info(f"Loaded {len(documents)} total documents")
             
-            # Split documents into chunks
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1000, 
                 chunk_overlap=200,
@@ -234,9 +230,7 @@ class ImprovedRAGHandler:
             texts = text_splitter.split_documents(documents)
             logging.info(f"Split into {len(texts)} text chunks")
             
-            # Create or update vector database
             if os.path.exists(PERSIST_DIRECTORY) and not force_recreate:
-                # Load existing database and add new documents
                 self.vectordb = Chroma(
                     persist_directory=PERSIST_DIRECTORY, 
                     embedding_function=self.embeddings
@@ -244,7 +238,6 @@ class ImprovedRAGHandler:
                 self.vectordb.add_documents(texts)
                 logging.info(f"Added {len(texts)} new chunks to existing database")
             else:
-                # Create new database
                 if os.path.exists(PERSIST_DIRECTORY):
                     import shutil
                     shutil.rmtree(PERSIST_DIRECTORY)
@@ -258,7 +251,6 @@ class ImprovedRAGHandler:
             
             self.vectordb.persist()
             
-            # Update metadata
             for file_path in files_to_process:
                 relative_path = os.path.relpath(file_path, DOCUMENTS_PATH)
                 metadata["files"][relative_path] = {
@@ -289,28 +281,36 @@ class ImprovedRAGHandler:
         """
         Creates or retrieves a RetrievalQA chain for question answering.
         """
+        self.logger.info("--- Getting QA chain ---")
+        start_time = time.time()
+
         if not os.path.exists(PERSIST_DIRECTORY):
-            logging.warning("Vector database not found.")
+            self.logger.warning("Vector database not found.")
             return None
         
         try:
             if not self.vectordb:
-                logging.info("Loading vector database...")
+                self.logger.info("Step C: Loading vector database...")
+                db_load_start_time = time.time()
                 self.vectordb = Chroma(
                     persist_directory=PERSIST_DIRECTORY, 
                     embedding_function=self.embeddings
                 )
+                self.logger.info(f"Step C finished in {time.time() - db_load_start_time:.2f} seconds.")
             
             if not self.retriever:
-                logging.info("Initializing retriever...")
+                self.logger.info("Step D: Initializing retriever...")
+                retriever_start_time = time.time()
                 self.retriever = self.vectordb.as_retriever(
                     search_type="similarity",
                     search_kwargs={"k": 5}  # Retrieve top 5 relevant chunks
                 )
+                self.logger.info(f"Step D finished in {time.time() - retriever_start_time:.2f} seconds.")
             
             # Recreate the chain only if the temperature has changed
             if not self.qa_chain or self.llm.temperature != temperature:
-                logging.info(f"Creating QA chain with temperature: {temperature}")
+                self.logger.info(f"Step E: Creating QA chain with temperature: {temperature}")
+                chain_creation_start_time = time.time()
                 self.llm.temperature = temperature
                 self.qa_chain = RetrievalQA.from_chain_type(
                     llm=self.llm,
@@ -319,11 +319,13 @@ class ImprovedRAGHandler:
                     return_source_documents=True,
                     verbose=False
                 )
+                self.logger.info(f"Step E finished in {time.time() - chain_creation_start_time:.2f} seconds.")
             
+            self.logger.info(f"--- QA chain ready in {time.time() - start_time:.2f} seconds ---")
             return self.qa_chain
             
         except Exception as e:
-            logging.error(f"Error creating QA chain: {str(e)}", exc_info=True)
+            self.logger.error(f"Error creating QA chain: {e}", exc_info=True)
             return None
     
     def search_documents(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
@@ -364,13 +366,10 @@ class ImprovedRAGHandler:
                 "files_by_type": {}
             }
             
-            # Count files by type
             for file_info in metadata.get("files", {}).values():
-                # This would need the file extension info in metadata
                 pass
             
             if self.vectordb:
-                # Try to get collection stats
                 try:
                     collection = self.vectordb._collection
                     stats["total_chunks"] = collection.count()

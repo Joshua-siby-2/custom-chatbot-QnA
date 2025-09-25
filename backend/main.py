@@ -533,31 +533,100 @@ def delete_document(filename: str):
         logging.error(f"Error deleting document: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
 
+@app.post("/ask")
+def ask(question: Question):
+    """Ask a question and get an AI-generated answer"""
+    logger.info("--- Starting /ask endpoint ---")
+    start_time = time.time()
+    
+    logger.info(f"Received question: {question.question}")
+    
+    if db_creation_status["in_progress"]:
+        logger.warning("Database creation is in progress.")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Database creation in progress ({db_creation_status['progress']}%). Please wait."
+        )
+   
+    if not db_creation_status["completed"]:
+        logger.warning("Vector database is not ready.")
+        raise HTTPException(
+            status_code=400, 
+            detail="Vector database not ready. Please create it first."
+        )
+   
+    try:
+        logger.info("Step 1: Getting QA chain.")
+        chain_start_time = time.time()
+        if 'rag_handler' in globals():
+            qa_chain = rag_handler.get_qa_chain(temperature=question.temperature)
+        else:
+            qa_chain = get_qa_chain()
+        logger.info(f"Step 1 completed in {time.time() - chain_start_time:.2f} seconds.")
+            
+        if not qa_chain:
+            logger.error("QA chain could not be initialized.")
+            raise HTTPException(
+                status_code=400, 
+                detail="QA chain could not be initialized. Please recreate the database."
+            )
+       
+        logger.info("Step 2: Processing question with QA chain.")
+        process_start_time = time.time()
+        result = qa_chain({"query": question.question})
+        logger.info(f"Step 2 completed in {time.time() - process_start_time:.2f} seconds.")
+        
+        logger.info("Step 3: Extracting source documents.")
+        sources_start_time = time.time()
+        sources = []
+        if "source_documents" in result:
+            for doc in result["source_documents"][:3]:
+                source_file = doc.metadata.get('source_file', 'Unknown')
+                if source_file not in sources:
+                    sources.append(source_file)
+        logger.info(f"Step 3 completed in {time.time() - sources_start_time:.2f} seconds.")
+        
+        logger.info(f"Successfully answered question: {question.question}")
+        logger.info(f"--- /ask endpoint finished in {time.time() - start_time:.2f} seconds ---")
+        return {
+            "answer": result["result"],
+            "sources": sources,
+            "question": question.question
+        }
+        
+    except Exception as e:
+        logger.error(f"Error processing question in /ask: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error processing question: {str(e)}")
+
 @app.post("/ask-stream")
 def ask_stream(question: Question):
     """Stream an answer token-by-token using Server-Sent Events (SSE)."""
-    logging.info(f"[stream] Received question: {question.question}")
+    logger.info("--- Starting /ask-stream endpoint ---")
+    start_time = time.time()
+    
+    logger.info(f"[stream] Received question: {question.question}")
 
     if db_creation_status["in_progress"]:
+        logger.warning("Database creation is in progress for /ask-stream.")
         raise HTTPException(
             status_code=400,
             detail=f"Database creation in progress ({db_creation_status['progress'] }%). Please wait."
         )
 
     if not db_creation_status["completed"]:
+        logger.warning("Vector database is not ready for /ask-stream.")
         raise HTTPException(
             status_code=400,
             detail="Vector database not ready. Please create it first."
         )
 
-    # Prepare a token queue and a background worker to run the chain
     token_queue: Queue = Queue()
 
-    # Lazy import for callbacks to avoid global dependency if not needed
     try:
         from langchain.callbacks.base import BaseCallbackHandler
+        logger.info("Successfully imported BaseCallbackHandler.")
     except Exception as e:
-        logging.error(f"Failed to import LangChain callback base: {e}")
+        logger.error(f"Failed to import LangChain callback base: {e}")
         raise HTTPException(status_code=500, detail="Server callback initialization error")
 
     class StreamCallbackHandler(BaseCallbackHandler):
@@ -565,30 +634,33 @@ def ask_stream(question: Question):
             try:
                 token_queue.put({"type": "token", "data": token})
             except Exception as e:
-                logging.error(f"[stream] Error enqueueing token: {e}")
+                logger.error(f"[stream] Error enqueueing token: {e}")
 
-    # Obtain QA chain with callbacks
     try:
+        logger.info("Step 1: Getting QA chain for streaming.")
+        chain_start_time = time.time()
         if 'rag_handler' in globals():
             qa_chain = rag_handler.get_qa_chain(temperature=question.temperature)
         else:
             qa_chain = get_qa_chain()
+        logger.info(f"Step 1 for streaming completed in {time.time() - chain_start_time:.2f} seconds.")
+
         if not qa_chain:
+            logger.error("QA chain could not be initialized for streaming.")
             raise HTTPException(status_code=400, detail="QA chain could not be initialized. Please recreate the database.")
     except HTTPException:
         raise
     except Exception as e:
-        logging.error(f"[stream] Error creating QA chain: {e}")
+        logger.error(f"[stream] Error creating QA chain: {e}")
         raise HTTPException(status_code=500, detail=f"Error creating QA chain: {str(e)}")
 
-    # Attach callbacks to chain and underlying LLM if present
     try:
+        logger.info("Step 2: Attaching callbacks to chain.")
         callback_handler = StreamCallbackHandler()
         if hasattr(qa_chain, 'callbacks') and isinstance(qa_chain.callbacks, list):
             qa_chain.callbacks.append(callback_handler)
         else:
             qa_chain.callbacks = [callback_handler]
-        # Try to attach to llm as well (best effort)
         if hasattr(qa_chain, 'llm_chain') and hasattr(qa_chain.llm_chain, 'llm'):
             llm_obj = qa_chain.llm_chain.llm
             if hasattr(llm_obj, 'callbacks') and isinstance(llm_obj.callbacks, list):
@@ -598,17 +670,23 @@ def ask_stream(question: Question):
                     llm_obj.callbacks = [callback_handler]
                 except Exception:
                     pass
+        logger.info("Step 2 for streaming completed.")
     except Exception as e:
-        logging.warning(f"[stream] Could not attach callbacks cleanly: {e}")
+        logger.warning(f"[stream] Could not attach callbacks cleanly: {e}")
 
-    # Run the chain in a background thread so we can stream tokens concurrently
     result_holder: Dict[str, Any] = {"result": None, "sources": []}
 
     def run_chain():
+        logger.info("Background thread started for chain execution.")
         try:
+            logger.info("Step 3: Running QA chain in background thread.")
+            chain_run_start_time = time.time()
             result = qa_chain({"query": question.question})
+            logger.info(f"Step 3 completed in {time.time() - chain_run_start_time:.2f} seconds.")
+            
             result_holder["result"] = result.get("result", "")
-            # Extract sources (file names only)
+            
+            logger.info("Step 4: Extracting sources in background thread.")
             sources: List[str] = []
             if "source_documents" in result:
                 for doc in result["source_documents"][:3]:
@@ -616,42 +694,47 @@ def ask_stream(question: Question):
                     if src not in sources:
                         sources.append(src)
             result_holder["sources"] = sources
+            logger.info("Step 4 for streaming completed.")
         except Exception as e:
-            logging.error(f"[stream] Error during chain execution: {e}")
+            logger.error(f"[stream] Error during chain execution: {e}")
             token_queue.put({"type": "error", "data": str(e)})
         finally:
             token_queue.put({"type": "end"})
+            logger.info("Background thread for chain execution finished.")
 
     worker = threading.Thread(target=run_chain, daemon=True)
     worker.start()
 
     def sse_event_generator():
+        logger.info("SSE event generator started.")
         try:
-            # Initial event
-            yield f"data: { _json.dumps({ 'type': 'start' }) }\n\n"
+            yield f"data: {_json.dumps({'type': 'start'})}\n\n"
             while True:
                 item = token_queue.get()
                 if not item:
                     continue
                 if item.get("type") == "token":
-                    # Stream token chunks
-                    yield f"data: { _json.dumps(item) }\n\n"
+                    yield f"data: {_json.dumps(item)}\n\n"
                 elif item.get("type") == "error":
-                    yield f"data: { _json.dumps(item) }\n\n"
+                    logger.error(f"SSE generator received an error: {item}")
+                    yield f"data: {_json.dumps(item)}\n\n"
                 elif item.get("type") == "end":
-                    # Send final summary (answer + sources)
+                    logger.info("SSE generator received end signal.")
                     summary = {
                         "type": "summary",
                         "answer": result_holder.get("result", ""),
                         "sources": result_holder.get("sources", [])
                     }
-                    yield f"data: { _json.dumps(summary) }\n\n"
+                    yield f"data: {_json.dumps(summary)}\n\n"
                     yield "event: done\ndata: {}\n\n"
+                    logger.info("SSE generator finished.")
                     break
         except GeneratorExit:
-            logging.info("[stream] Client disconnected from SSE stream")
+            logger.info("[stream] Client disconnected from SSE stream")
         except Exception as e:
-            logging.error(f"[stream] SSE generator error: {e}")
+            logger.error(f"[stream] SSE generator error: {e}")
+        finally:
+            logger.info(f"--- /ask-stream endpoint finished in {time.time() - start_time:.2f} seconds ---")
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream")
 
