@@ -19,12 +19,12 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import Ollama
 from langchain.schema import Document
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Note: Do NOT configure logging here to avoid duplicate handlers.
+# The application entrypoint (backend/main.py) is responsible for logging configuration.
 
 # Configuration
 OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL = "llama3.2:3b"
+OLLAMA_MODEL = "llama3.2:1b"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
 # Get the absolute path to the project root
@@ -71,10 +71,17 @@ class ImprovedRAGHandler:
         """Initialize LLM once"""
         self.logger.info("Step B: Initializing LLM...")
         start_time = time.time()
+        # Tune generation parameters to improve latency while retaining quality.
+        # - streaming: enable token streaming for better perceived latency
+        # - num_predict: cap maximum generated tokens to speed up responses
+        # You can further tune: top_k, top_p, repeat_penalty as needed.
         self.llm = Ollama(
-            base_url=OLLAMA_BASE_URL, 
+            base_url=OLLAMA_BASE_URL,
             model=OLLAMA_MODEL,
             temperature=0.1,
+            num_predict=256,
+            # num_ctx can be tuned based on your hardware and needs (defaults are generally fine)
+            # num_ctx=2048,
         )
         self.logger.info(f"Step B finished in {time.time() - start_time:.2f} seconds.")
     

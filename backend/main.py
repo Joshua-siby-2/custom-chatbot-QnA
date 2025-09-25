@@ -573,7 +573,7 @@ def ask(question: Question):
        
         logger.info("Step 2: Processing question with QA chain.")
         process_start_time = time.time()
-        result = qa_chain({"query": question.question})
+        result = qa_chain.invoke({"query": question.question})
         logger.info(f"Step 2 completed in {time.time() - process_start_time:.2f} seconds.")
         
         logger.info("Step 3: Extracting source documents.")
@@ -681,7 +681,7 @@ def ask_stream(question: Question):
         try:
             logger.info("Step 3: Running QA chain in background thread.")
             chain_run_start_time = time.time()
-            result = qa_chain({"query": question.question})
+            result = qa_chain.invoke({"query": question.question})
             logger.info(f"Step 3 completed in {time.time() - chain_run_start_time:.2f} seconds.")
             
             result_holder["result"] = result.get("result", "")
